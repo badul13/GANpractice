@@ -1,11 +1,8 @@
 import os
-import cv2
-import dlib
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from IPython.core.display_functions import clear_output
-from imutils import face_utils
 from tensorflow.keras.layers import Input
 from tensorflow.keras.optimizers import Adam
 import logging
@@ -16,72 +13,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', date
 
 # 경고 메시지 숨기기
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-# Dlib의 얼굴 검출기와 랜드마크 예측기 로드
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
-
-def extract_face(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    rects = detector(gray, 1)
-    if len(rects) == 0:
-        return None
-
-    rect = rects[0]
-    shape = predictor(gray, rect)
-    shape = face_utils.shape_to_np(shape)
-
-    (x, y, w, h) = face_utils.rect_to_bb(rect)
-    face = frame[y:y + h, x:x + w]
-
-    face = cv2.resize(face, (128, 128))
-    face = face / 255.0  # Normalize to [0, 1]
-
-    return face
-
-def load_video(video_path):
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        face = extract_face(frame)
-        if face is not None:
-            frames.append(face)
-    cap.release()
-    return np.array(frames)
-
-def load_image(image_path):
-    frame = cv2.imread(image_path)
-    face = extract_face(frame)
-    return face if face is not None else None
-
-def load_data_from_folder(folder_path):
-    data = []
-    for filename in os.listdir(folder_path):
-        path = os.path.join(folder_path, filename)
-        try:
-            if filename.endswith(('.mp4', '.avi', '.mov')):
-                data.extend(load_video(path))
-            elif filename.endswith(('.jpg', '.jpeg', '.png')):
-                face = load_image(path)
-                if face is not None:
-                    data.append(face)
-        except Exception as e:
-            logging.warning(f"Failed to process {path}: {e}")
-    return np.array(data)
-
-def augment_images(images):
-    augmented_images = []
-    for img in images:
-        img = tf.image.random_flip_left_right(img)
-        img = tf.image.random_brightness(img, max_delta=0.1)
-        img = tf.image.random_contrast(img, lower=0.7, upper=1.3)
-        img = tf.image.random_hue(img, max_delta=0.05)
-        img = tf.image.random_saturation(img, lower=0.7, upper=1.3)
-        augmented_images.append(img)
-    return np.array(augmented_images)
 
 def build_generator():
     model = tf.keras.Sequential([
@@ -145,19 +76,21 @@ BATCH_SIZE = 64
 EPOCHS = 10000
 BUFFER_SIZE = 60000
 
-folder_path = 'data_folder'  # 사용할 폴더 경로
-data_frames = load_data_from_folder(folder_path)
-logging.info(f"Loaded {len(data_frames)} frames.")
-
-augmented_data_frames = augment_images(data_frames)
-logging.info(f"Augmented to {len(augmented_data_frames)} frames.")
+# 데이터 로드
+augmented_data_frames = np.load('preprocessed_data.npy')
+logging.info(f"Loaded preprocessed data from 'preprocessed_data.npy'.")
 
 dataset = tf.data.Dataset.from_tensor_slices(augmented_data_frames).shuffle(BUFFER_SIZE).batch(BATCH_SIZE).repeat()
 
 def gradient_penalty(batch_size, real_images, fake_images):
-    epsilon = tf.random.uniform([batch_size, 1, 1, 1], 0.0, 1.0)
+    epsilon = tf.random.uniform([tf.shape(real_images)[0], 1, 1, 1], 0.0, 1.0)
     real_images = tf.cast(real_images, dtype=tf.float32)
     fake_images = tf.cast(fake_images, dtype=tf.float32)
+
+    # 배치 크기 맞추기
+    min_batch_size = tf.minimum(tf.shape(real_images)[0], tf.shape(fake_images)[0])
+    real_images = real_images[:min_batch_size]
+    fake_images = fake_images[:min_batch_size]
 
     interpolated_images = epsilon * real_images + (1 - epsilon) * fake_images
 
@@ -169,48 +102,46 @@ def gradient_penalty(batch_size, real_images, fake_images):
     norm = tf.sqrt(tf.reduce_sum(tf.square(gradients), axis=[1, 2, 3]))
     gp = tf.reduce_mean((norm - 1.0) ** 2)
     return gp
+80
+
+
+
+
 
 @tf.function
-def train_step(image_batch):
-    batch_size = tf.shape(image_batch)[0]
-    noise = tf.random.normal([batch_size, 100], dtype=tf.float32)
+def train_step(images):
+    noise = tf.random.normal([BATCH_SIZE, 100])
 
     with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
         generated_images = generator(noise, training=True)
 
-        real_output = discriminator(image_batch, training=True)
+        real_output = discriminator(images, training=True)
         fake_output = discriminator(generated_images, training=True)
 
         gen_loss = generator_loss(fake_output)
         disc_loss = discriminator_loss(real_output, fake_output)
-
-        gp = gradient_penalty(batch_size, image_batch, generated_images)
-        disc_loss += tf.cast(gp, dtype=tf.float32)
+        gp = gradient_penalty(BATCH_SIZE, images, generated_images)
+        total_disc_loss = disc_loss + 10.0 * gp
 
     gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
-    gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
+    gradients_of_discriminator = disc_tape.gradient(total_disc_loss, discriminator.trainable_variables)
 
     generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
     discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
 
     return gen_loss, disc_loss
 
-def generate_and_save_images(model, epoch, test_input, output_dir='generated_images'):
+def generate_and_save_images(model, epoch, test_input):
     predictions = model(test_input, training=False)
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
     fig = plt.figure(figsize=(4, 4))
+
     for i in range(predictions.shape[0]):
         plt.subplot(4, 4, i + 1)
-        plt.imshow((predictions[i] * 127.5 + 127.5) / 255.0)
+        plt.imshow((predictions[i] + 1) / 2)
         plt.axis('off')
-    output_path = os.path.join(output_dir, 'image_at_epoch_{:04d}.png'.format(epoch))
-    plt.savefig(output_path)
-    clear_output(wait=True)
+
+    plt.savefig('image_at_epoch_{:04d}.png'.format(epoch))
     plt.show()
-    plt.close(fig)
 
 def save_model(generator, discriminator, model_dir='./models'):
     if not os.path.exists(model_dir):
