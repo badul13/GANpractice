@@ -1,39 +1,35 @@
 import cv2
 import os
-from mtcnn import MTCNN
+from tqdm import tqdm
 
-
-def preprocess_videos(video_path_A, video_path_B, output_dir, frame_size=(128, 128)):
+def preprocess_videos(video_a_path, video_b_path, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    detector = MTCNN()
+    cap_a = cv2.VideoCapture(video_a_path)
+    cap_b = cv2.VideoCapture(video_b_path)
 
-    def extract_faces(video_path, label):
-        cap = cv2.VideoCapture(video_path)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_index = 0
+    frame_id = 0
+    total_frames = min(int(cap_a.get(cv2.CAP_PROP_FRAME_COUNT)), int(cap_b.get(cv2.CAP_PROP_FRAME_COUNT)))
+    frame_width = int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        while frame_index < frame_count:
-            ret, frame = cap.read()
-            if not ret:
+    with tqdm(total=total_frames, desc="Preprocessing videos") as pbar:
+        while cap_a.isOpened() and cap_b.isOpened():
+            ret_a, frame_a = cap_a.read()
+            ret_b, frame_b = cap_b.read()
+
+            if not ret_a or not ret_b:
                 break
 
-            results = detector.detect_faces(frame)
-            if results:
-                face = results[0]['box']
-                x, y, w, h = face
-                face_img = frame[y:y + h, x:x + w]
-                face_img = cv2.resize(face_img, frame_size)
-                cv2.imwrite(os.path.join(output_dir, f"{label}_{frame_index:04d}.png"), face_img)
+            cv2.imwrite(os.path.join(output_dir, f"A_{frame_id:04d}.png"), frame_a)
+            cv2.imwrite(os.path.join(output_dir, f"B_{frame_id:04d}.png"), frame_b)
+            frame_id += 1
 
-            frame_index += 1
+            pbar.update(1)
 
-        cap.release()
-
-    extract_faces(video_path_A, 'A')
-    extract_faces(video_path_B, 'B')
-
+    cap_a.release()
+    cap_b.release()
 
 # 예시 사용법
-preprocess_videos('video_A.mp4', 'video_B.mp4', 'processed_frames')
+preprocess_videos('video_a.mp4', 'video_b.mp4', 'processed_frames')
