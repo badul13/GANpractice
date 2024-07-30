@@ -1,99 +1,103 @@
-import tensorflow as tf
-from tensorflow.keras.layers import Input, Conv2D, Conv2DTranspose, LeakyReLU, BatchNormalization, Activation, Flatten, Dense
-from tensorflow.keras.models import Model
-import cv2
+from keras.layers import Input, Conv2D, Conv2DTranspose, BatchNormalization, LeakyReLU, Activation, Concatenate, Dropout, Cropping2D
+from keras.models import Model
+from keras.optimizers import Adam
 import numpy as np
+import cv2
 import os
-from tensorflow.keras.applications import VGG19
-from tensorflow.keras.optimizers import Adam
 from tqdm import tqdm
+from keras.applications import VGG19
+import tensorflow as tf
 
-def build_generator(input_shape):
-    inputs = Input(shape=input_shape)
+# VGG19 모델을 전역 변수로 한 번만 생성
+vgg = VGG19(include_top=False, weights='imagenet', input_shape=(1088, 1920, 3))
+vgg.trainable = False
 
-    # Downsampling
-    x = Conv2D(64, kernel_size=4, strides=2, padding='same')(inputs)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    x = Conv2D(128, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    x = Conv2D(256, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    x = Conv2D(512, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    # Upsampling
-    x = Conv2DTranspose(256, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-
-    x = Conv2DTranspose(128, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-
-    x = Conv2DTranspose(64, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-
-    x = Conv2DTranspose(32, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-
-    outputs = Conv2D(3, kernel_size=4, strides=1, padding='same', activation='tanh')(x)
-
-    model = Model(inputs, outputs)
-    return model
-
-def build_discriminator(input_shape):
-    inputs = Input(shape=input_shape)
-
-    x = Conv2D(64, kernel_size=4, strides=2, padding='same')(inputs)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    x = Conv2D(128, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    x = Conv2D(256, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    x = Conv2D(512, kernel_size=4, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = LeakyReLU(alpha=0.2)(x)
-
-    x = Flatten()(x)
-    outputs = Dense(1, activation='sigmoid')(x)
-
-    model = Model(inputs, outputs)
-    return model
-
+# VGG19의 특정 레이어 출력을 받아오는 함수 정의
 def perceptual_loss(y_true, y_pred):
-    vgg = VGG19(include_top=False, weights='imagenet', input_shape=(None, None, 3))
-    vgg.trainable = False
-    model = Model(vgg.input, vgg.get_layer('block3_conv3').output)
-    return tf.reduce_mean(tf.square(model(y_true) - model(y_pred)))
+    loss_model = Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv4').output)
+    loss_model.trainable = False
+    return tf.reduce_mean(tf.square(loss_model(y_true) - loss_model(y_pred)))
 
-def load_and_preprocess_image(path):
-    img = cv2.imread(path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32) / 127.5 - 1
-    return img
+def build_generator(img_shape):
+
+    def conv2d(layer_input, filters, f_size=4, bn=True):
+        d = Conv2D(filters, kernel_size=f_size, strides=2, padding='same')(layer_input)
+        d = LeakyReLU(alpha=0.2)(d)
+        if bn:
+            d = BatchNormalization(momentum=0.8)(d)
+        return d
+
+    def deconv2d(layer_input, skip_input, filters, f_size=4, dropout_rate=0):
+        u = Conv2DTranspose(filters, kernel_size=f_size, strides=2, padding='same', activation='relu')(layer_input)
+        if dropout_rate:
+            u = Dropout(dropout_rate)(u)
+        u = BatchNormalization(momentum=0.8)(u)
+        # Cropping2D를 사용하여 크기 맞추기
+        h_diff = u.shape[1] - skip_input.shape[1]
+        w_diff = u.shape[2] - skip_input.shape[2]
+        u = Cropping2D(((h_diff // 2, h_diff - h_diff // 2), (w_diff // 2, w_diff - w_diff // 2)))(u)
+        u = Concatenate()([u, skip_input])
+        return u
+
+    d0 = Input(shape=img_shape)
+
+    d1 = conv2d(d0, 64, bn=False)
+    d2 = conv2d(d1, 128)
+    d3 = conv2d(d2, 256)
+    d4 = conv2d(d3, 512)
+    d5 = conv2d(d4, 512)
+    d6 = conv2d(d5, 512)
+    d7 = conv2d(d6, 512)
+
+    u1 = deconv2d(d7, d6, 512)
+    u2 = deconv2d(u1, d5, 512)
+    u3 = deconv2d(u2, d4, 512)
+    u4 = deconv2d(u3, d3, 256)
+    u5 = deconv2d(u4, d2, 128)
+    u6 = deconv2d(u5, d1, 64)
+
+    u7 = Conv2DTranspose(64, kernel_size=4, strides=2, padding='same', activation='relu')(u6)
+    output_img = Conv2D(img_shape[-1], kernel_size=4, strides=1, padding='same', activation='tanh')(u7)
+
+    return Model(d0, output_img)
+
+def build_discriminator(img_shape):
+
+    def d_layer(layer_input, filters, f_size=4, bn=True):
+        d = Conv2D(filters, kernel_size=f_size, strides=2, padding='same')(layer_input)
+        d = LeakyReLU(alpha=0.2)(d)
+        if bn:
+            d = BatchNormalization(momentum=0.8)(d)
+        return d
+
+    img = Input(shape=img_shape)
+
+    d1 = d_layer(img, 64, bn=False)
+    d2 = d_layer(d1, 128)
+    d3 = d_layer(d2, 256)
+    d4 = d_layer(d3, 512)
+
+    # 출력 크기를 (batch_size, 1)로 변경
+    validity = Conv2D(1, kernel_size=4, strides=1, padding='valid')(d4)
+    validity = tf.keras.layers.Flatten()(validity)
+    validity = tf.keras.layers.Dense(1, activation='sigmoid')(validity)
+
+    return Model(img, validity)
 
 def load_batch(data_dir, batch_size):
-    files = [f for f in os.listdir(data_dir) if f.startswith('B_')]
-    np.random.shuffle(files)
-    batch_files = files[:batch_size]
-    batch_images = [load_and_preprocess_image(os.path.join(data_dir, f)) for f in batch_files]
-    return np.array(batch_images)
+    # 배치 데이터를 로드하는 함수 정의
+    images = []
+    for img_name in os.listdir(data_dir):
+        img = cv2.imread(os.path.join(data_dir, img_name))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img / 127.5 - 1.0  # Normalize to [-1, 1]
+        images.append(img)
+    images = np.array(images)
+    idx = np.random.randint(0, images.shape[0], batch_size)
+    return images[idx]
 
 def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
-    img_shape = (1080, 1920, 3)
+    img_shape = (1088, 1920, 3)
     print(f"Image shape: {img_shape}")
 
     generator = build_generator(img_shape)
@@ -102,7 +106,8 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
-    optimizer = Adam(0.0002, 0.5)
+    optimizer = tf.keras.optimizers.Adam(0.0002, 0.5)
+    optimizer.build(generator.trainable_variables + discriminator.trainable_variables)
 
     discriminator.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     discriminator.trainable = False

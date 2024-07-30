@@ -48,4 +48,4 @@ def preprocess_videos(video_a_path, video_b_path, output_dir, target_size=(1080,
             cap_b.release()
 
 # 예시 사용법 (비디오 파일 이름을 실제 파일 이름으로 변경하세요)
-preprocess_videos('video_A.mp4', 'video_B.mp4', 'processed_frames', target_size=(1920, 1080))
+preprocess_videos('video_A.mp4', 'video_B.mp4', 'processed_frames', target_size=(1920, 1088))
