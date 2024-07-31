@@ -1,6 +1,5 @@
-from keras.layers import Input, Conv2D, Conv2DTranspose, BatchNormalization, LeakyReLU, Activation, Concatenate, Dropout, Cropping2D
+from keras.layers import Input, Conv2D, Conv2DTranspose, BatchNormalization, LeakyReLU, Activation, Concatenate, Dropout, Cropping2D, Flatten, Dense
 from keras.models import Model
-from keras.optimizers import Adam
 import numpy as np
 import cv2
 import os
@@ -11,15 +10,15 @@ import tensorflow as tf
 # VGG19 모델을 전역 변수로 한 번만 생성
 vgg = VGG19(include_top=False, weights='imagenet', input_shape=(1088, 1920, 3))
 vgg.trainable = False
+vgg_output = Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv4').output)
 
-# VGG19의 특정 레이어 출력을 받아오는 함수 정의
+# Perceptual loss 함수 정의
 def perceptual_loss(y_true, y_pred):
-    loss_model = Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv4').output)
-    loss_model.trainable = False
-    return tf.reduce_mean(tf.square(loss_model(y_true) - loss_model(y_pred)))
+    y_true_features = vgg_output(y_true)
+    y_pred_features = vgg_output(y_pred)
+    return tf.reduce_mean(tf.square(y_true_features - y_pred_features))
 
 def build_generator(img_shape):
-
     def conv2d(layer_input, filters, f_size=4, bn=True):
         d = Conv2D(filters, kernel_size=f_size, strides=2, padding='same')(layer_input)
         d = LeakyReLU(alpha=0.2)(d)
@@ -32,7 +31,6 @@ def build_generator(img_shape):
         if dropout_rate:
             u = Dropout(dropout_rate)(u)
         u = BatchNormalization(momentum=0.8)(u)
-        # Cropping2D를 사용하여 크기 맞추기
         h_diff = u.shape[1] - skip_input.shape[1]
         w_diff = u.shape[2] - skip_input.shape[2]
         u = Cropping2D(((h_diff // 2, h_diff - h_diff // 2), (w_diff // 2, w_diff - w_diff // 2)))(u)
@@ -62,7 +60,6 @@ def build_generator(img_shape):
     return Model(d0, output_img)
 
 def build_discriminator(img_shape):
-
     def d_layer(layer_input, filters, f_size=4, bn=True):
         d = Conv2D(filters, kernel_size=f_size, strides=2, padding='same')(layer_input)
         d = LeakyReLU(alpha=0.2)(d)
@@ -76,16 +73,14 @@ def build_discriminator(img_shape):
     d2 = d_layer(d1, 128)
     d3 = d_layer(d2, 256)
     d4 = d_layer(d3, 512)
+    d5 = d_layer(d4, 512)
 
-    # 출력 크기를 (batch_size, 1)로 변경
-    validity = Conv2D(1, kernel_size=4, strides=1, padding='valid')(d4)
-    validity = tf.keras.layers.Flatten()(validity)
-    validity = tf.keras.layers.Dense(1, activation='sigmoid')(validity)
+    validity = Flatten()(d5)
+    validity = Dense(1, activation='sigmoid')(validity)
 
     return Model(img, validity)
 
 def load_batch(data_dir, batch_size):
-    # 배치 데이터를 로드하는 함수 정의
     images = []
     for img_name in os.listdir(data_dir):
         img = cv2.imread(os.path.join(data_dir, img_name))
@@ -119,7 +114,6 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
     combined = Model(z, [img, valid])
     combined.compile(loss=[perceptual_loss, 'binary_crossentropy'], loss_weights=[1.0, 1.0], optimizer=optimizer)
 
-    # 체크포인트 불러오기
     checkpoint_path = os.path.join(checkpoint_dir, "gan_checkpoint")
     if os.path.exists(checkpoint_path + '.index'):
         generator.load_weights(checkpoint_path)
@@ -145,7 +139,7 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
 
             progress_bar.set_postfix({
                 'D loss': d_loss[0],
-                'D acc': 100 * d_loss[1],
+                'D acc': d_loss[1],
                 'G loss': g_loss[0],
                 'Perceptual loss': g_loss[1]
             })
@@ -158,12 +152,11 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
         generator.save_weights(checkpoint_path)
         discriminator.save_weights(checkpoint_path)
 
-    # 최종 영상 생성 및 저장
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
     result_video = []
-    for i in range(100):  # 원하는 프레임 수만큼 반복
+    for i in range(100):
         noise = np.random.normal(0, 1, (1,) + img_shape)
         generated_frame = generator.predict(noise)
         result_video.append(generated_frame[0])
@@ -173,5 +166,4 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
         out.write(((frame + 1) * 127.5).astype(np.uint8))
     out.release()
 
-# 배치 크기를 조정
-train_gan(epochs=100, batch_size=8, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
+train_gan(epochs=100, batch_size=4, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
