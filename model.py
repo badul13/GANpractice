@@ -1,11 +1,12 @@
-from keras.layers import Input, Conv2D, Conv2DTranspose, BatchNormalization, LeakyReLU, Activation, Concatenate, Dropout, Cropping2D, Flatten, Dense
-from keras.models import Model
-import numpy as np
-import cv2
 import os
-from tqdm import tqdm
-from keras.applications import VGG19
+import cv2
+import numpy as np
 import tensorflow as tf
+from keras.layers import Input, Conv2D, Conv2DTranspose, BatchNormalization, LeakyReLU, Concatenate, Dropout, Cropping2D, Flatten, Dense
+from keras.models import Model
+from keras.applications import VGG19
+from tqdm import tqdm
+import dlib
 
 # VGG19 모델 생성
 vgg = VGG19(include_top=False, weights='imagenet', input_shape=(1088, 1920, 3))
@@ -39,23 +40,21 @@ def build_generator(img_shape):
 
     d0 = Input(shape=img_shape)
 
-    d1 = conv2d(d0, 64, bn=False)
-    d2 = conv2d(d1, 128)
-    d3 = conv2d(d2, 256)
-    d4 = conv2d(d3, 512)
-    d5 = conv2d(d4, 512)
-    d6 = conv2d(d5, 512)
-    d7 = conv2d(d6, 512)
+    d1 = conv2d(d0, 32, bn=False)
+    d2 = conv2d(d1, 64)
+    d3 = conv2d(d2, 128)
+    d4 = conv2d(d3, 256)
+    d5 = conv2d(d4, 256)
+    d6 = conv2d(d5, 256)
 
-    u1 = deconv2d(d7, d6, 512)
-    u2 = deconv2d(u1, d5, 512)
-    u3 = deconv2d(u2, d4, 512)
-    u4 = deconv2d(u3, d3, 256)
-    u5 = deconv2d(u4, d2, 128)
-    u6 = deconv2d(u5, d1, 64)
+    u1 = deconv2d(d6, d5, 256)
+    u2 = deconv2d(u1, d4, 256)
+    u3 = deconv2d(u2, d3, 128)
+    u4 = deconv2d(u3, d2, 64)
+    u5 = deconv2d(u4, d1, 32)
 
-    u7 = Conv2DTranspose(64, kernel_size=4, strides=2, padding='same', activation='relu')(u6)
-    output_img = Conv2D(img_shape[-1], kernel_size=4, strides=1, padding='same', activation='tanh')(u7)
+    u6 = Conv2DTranspose(32, kernel_size=4, strides=2, padding='same', activation='relu')(u5)
+    output_img = Conv2D(img_shape[-1], kernel_size=4, strides=1, padding='same', activation='tanh')(u6)
 
     return Model(d0, output_img)
 
@@ -69,24 +68,32 @@ def build_discriminator(img_shape):
 
     img = Input(shape=img_shape)
 
-    d1 = d_layer(img, 64, bn=False)
-    d2 = d_layer(d1, 128)
-    d3 = d_layer(d2, 256)
-    d4 = d_layer(d3, 512)
-    d5 = d_layer(d4, 512)
+    d1 = d_layer(img, 32, bn=False)
+    d2 = d_layer(d1, 64)
+    d3 = d_layer(d2, 128)
+    d4 = d_layer(d3, 256)
 
-    validity = Flatten()(d5)
+    validity = Conv2D(1, kernel_size=4, strides=1, padding='valid')(d4)
+    validity = Flatten()(validity)
     validity = Dense(1, activation='sigmoid')(validity)
 
     return Model(img, validity)
 
 def load_batch(data_dir, batch_size):
+    detector = dlib.get_frontal_face_detector()
     images = []
     for img_name in os.listdir(data_dir):
-        img = cv2.imread(os.path.join(data_dir, img_name))
+        img_path = os.path.join(data_dir, img_name)
+        img = cv2.imread(img_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = img / 127.5 - 1.0  # Normalize to [-1, 1]
-        images.append(img)
+        dets = detector(img, 1)
+        for _, d in enumerate(dets):
+            face = img[d.top():d.bottom(), d.left():d.right()]
+            face = cv2.resize(face, (1088, 1920))
+            face = face / 127.5 - 1.0  # Normalize to [-1, 1]
+            images.append(face)
+        if len(images) >= batch_size:
+            break
     images = np.array(images)
     idx = np.random.randint(0, images.shape[0], batch_size)
     return images[idx]
@@ -114,17 +121,10 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
     combined = Model(z, [img, valid])
     combined.compile(loss=[perceptual_loss, 'binary_crossentropy'], loss_weights=[1.0, 1.0], optimizer=optimizer)
 
-    # 모델 체크포인트 경로 설정
     checkpoint_path = os.path.join(checkpoint_dir, "gan_checkpoint")
-    best_generator_path = os.path.join(checkpoint_dir, "best_generator.h5")
-    best_discriminator_path = os.path.join(checkpoint_dir, "best_discriminator.h5")
-
-    if os.path.exists(best_generator_path) and os.path.exists(best_discriminator_path):
-        print("모델 체크포인트를 불러오는 중입니다...")
-        generator.load_weights(best_generator_path)
-        discriminator.load_weights(best_discriminator_path)
-    else:
-        print("모델을 처음부터 학습합니다...")
+    if os.path.exists(checkpoint_path + '.index'):
+        generator.load_weights(checkpoint_path)
+        discriminator.load_weights(checkpoint_path)
 
     best_loss = float('inf')
 
@@ -146,15 +146,15 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
 
             progress_bar.set_postfix({
                 'D loss': d_loss[0],
-                'D acc': d_loss[1],
+                'D acc': 100 * d_loss[1],
                 'G loss': g_loss[0],
                 'Perceptual loss': g_loss[1]
             })
 
         if d_loss[0] < best_loss:
             best_loss = d_loss[0]
-            generator.save_weights(best_generator_path)
-            discriminator.save_weights(best_discriminator_path)
+            generator.save_weights(os.path.join(checkpoint_dir, "best_generator.h5"))
+            discriminator.save_weights(os.path.join(checkpoint_dir, "best_discriminator.h5"))
 
         generator.save_weights(checkpoint_path)
         discriminator.save_weights(checkpoint_path)
@@ -173,4 +173,5 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
         out.write(((frame + 1) * 127.5).astype(np.uint8))
     out.release()
 
-train_gan(epochs=3, batch_size=4, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
+# 배치 크기를 조정
+train_gan(epochs=10, batch_size=8, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
