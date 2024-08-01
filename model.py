@@ -7,7 +7,7 @@ from tqdm import tqdm
 from keras.applications import VGG19
 import tensorflow as tf
 
-# VGG19 모델을 전역 변수로 한 번만 생성
+# VGG19 모델 생성
 vgg = VGG19(include_top=False, weights='imagenet', input_shape=(1088, 1920, 3))
 vgg.trainable = False
 vgg_output = Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv4').output)
@@ -114,10 +114,17 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
     combined = Model(z, [img, valid])
     combined.compile(loss=[perceptual_loss, 'binary_crossentropy'], loss_weights=[1.0, 1.0], optimizer=optimizer)
 
+    # 모델 체크포인트 경로 설정
     checkpoint_path = os.path.join(checkpoint_dir, "gan_checkpoint")
-    if os.path.exists(checkpoint_path + '.index'):
-        generator.load_weights(checkpoint_path)
-        discriminator.load_weights(checkpoint_path)
+    best_generator_path = os.path.join(checkpoint_dir, "best_generator.h5")
+    best_discriminator_path = os.path.join(checkpoint_dir, "best_discriminator.h5")
+
+    if os.path.exists(best_generator_path) and os.path.exists(best_discriminator_path):
+        print("모델 체크포인트를 불러오는 중입니다...")
+        generator.load_weights(best_generator_path)
+        discriminator.load_weights(best_discriminator_path)
+    else:
+        print("모델을 처음부터 학습합니다...")
 
     best_loss = float('inf')
 
@@ -146,8 +153,8 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
 
         if d_loss[0] < best_loss:
             best_loss = d_loss[0]
-            generator.save_weights(os.path.join(checkpoint_dir, "best_generator.h5"))
-            discriminator.save_weights(os.path.join(checkpoint_dir, "best_discriminator.h5"))
+            generator.save_weights(best_generator_path)
+            discriminator.save_weights(best_discriminator_path)
 
         generator.save_weights(checkpoint_path)
         discriminator.save_weights(checkpoint_path)
@@ -166,4 +173,4 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
         out.write(((frame + 1) * 127.5).astype(np.uint8))
     out.release()
 
-train_gan(epochs=100, batch_size=4, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
+train_gan(epochs=3, batch_size=4, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
