@@ -8,6 +8,8 @@ from keras.applications import VGG19
 from tqdm import tqdm
 import dlib
 
+TF_ENABLE_ONEDNN_OPTS=0
+
 # VGG19 모델 생성
 vgg = VGG19(include_top=False, weights='imagenet', input_shape=(1088, 1920, 3))
 vgg.trainable = False
