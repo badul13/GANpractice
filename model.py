@@ -2,13 +2,12 @@ import os
 import cv2
 import numpy as np
 import tensorflow as tf
-from keras.layers import Input, Conv2D, Conv2DTranspose, BatchNormalization, LeakyReLU, Concatenate, Dropout, Cropping2D, Flatten, Dense
+from keras.layers import Input, Conv2D, Conv2DTranspose, BatchNormalization, LeakyReLU, Concatenate, Dropout, \
+    Cropping2D, Flatten, Dense
 from keras.models import Model
 from keras.applications import VGG19
 from tqdm import tqdm
-import dlib
-
-TF_ENABLE_ONEDNN_OPTS=0
+from mtcnn import MTCNN  # mtcnn 임포트
 
 # VGG19 모델 생성
 vgg = VGG19(include_top=False, weights='imagenet', input_shape=(1088, 1920, 3))
@@ -82,23 +81,36 @@ def build_discriminator(img_shape):
     return Model(img, validity)
 
 def load_batch(data_dir, batch_size):
-    detector = dlib.get_frontal_face_detector()
+    detector = MTCNN()  # mtcnn 인스턴스 생성
+    image_files = [os.path.join(data_dir, fname) for fname in os.listdir(data_dir) if
+                   fname.endswith('.jpg') or fname.endswith('.png')]
+    np.random.shuffle(image_files)
+
     images = []
-    for img_name in os.listdir(data_dir):
-        img_path = os.path.join(data_dir, img_name)
+    for img_path in image_files:
         img = cv2.imread(img_path)
+        if img is None:
+            print(f"Warning: Failed to read image {img_path}")
+            continue
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        dets = detector(img, 1)
-        for _, d in enumerate(dets):
-            face = img[d.top():d.bottom(), d.left():d.right()]
-            face = cv2.resize(face, (1088, 1920))
-            face = face / 127.5 - 1.0  # Normalize to [-1, 1]
-            images.append(face)
+        faces = detector.detect_faces(img)
+        if len(faces) == 0:
+            print(f"Warning: No faces detected in image {img_path}")
+            continue
+        for face in faces:
+            x, y, width, height = face['box']
+            face_img = img[y:y+height, x:x+width]
+            face_img = cv2.resize(face_img, (1920, 1088))
+            face_img = face_img / 127.5 - 1.0  # Normalize to [-1, 1]
+            images.append(face_img)
         if len(images) >= batch_size:
             break
-    images = np.array(images)
-    idx = np.random.randint(0, images.shape[0], batch_size)
-    return images[idx]
+
+    if len(images) < batch_size:
+        raise ValueError(
+            "Not enough images to create a batch. Please check the data directory and face detection logic.")
+
+    return np.array(images[:batch_size])
 
 def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
     img_shape = (1088, 1920, 3)
@@ -131,9 +143,14 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
     best_loss = float('inf')
 
     for epoch in range(epochs):
-        progress_bar = tqdm(range(batch_size), desc=f"Epoch {epoch+1}/{epochs}")
+        progress_bar = tqdm(range(batch_size), desc=f"Epoch {epoch + 1}/{epochs}")
         for _ in progress_bar:
-            real_images = load_batch(data_dir, batch_size)
+            try:
+                real_images = load_batch(data_dir, batch_size)
+            except ValueError as e:
+                print(e)
+                continue
+
             noise = np.random.normal(0, 1, (batch_size,) + img_shape)
             fake_images = generator.predict(noise)
 
@@ -170,10 +187,11 @@ def train_gan(epochs, batch_size, data_dir, checkpoint_dir, output_dir):
         generated_frame = generator.predict(noise)
         result_video.append(generated_frame[0])
 
-    out = cv2.VideoWriter(os.path.join(output_dir, 'result_video.mp4'), cv2.VideoWriter_fourcc(*'mp4v'), 30, (img_shape[1], img_shape[0]))
+    out = cv2.VideoWriter(os.path.join(output_dir, 'result_video.mp4'), cv2.VideoWriter_fourcc(*'mp4v'), 30,
+                          (img_shape[1], img_shape[0]))
     for frame in result_video:
         out.write(((frame + 1) * 127.5).astype(np.uint8))
     out.release()
 
-# 배치 크기를 조정
-train_gan(epochs=10, batch_size=8, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
+if __name__ == "__main__":
+    train_gan(epochs=10, batch_size=8, data_dir='processed_frames', checkpoint_dir='checkpoints', output_dir='output')
